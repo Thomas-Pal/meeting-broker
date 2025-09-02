@@ -1,5 +1,5 @@
 // server/index.js
-// Load env from .env even if you don’t use --env-file locally
+// Load env locally (Cloud Run ignores this and uses service env)
 import 'dotenv/config';
 
 import express from 'express';
@@ -14,95 +14,58 @@ import { randomUUID } from 'crypto';
 
 /**
  * ============================
- * Environment configuration
+ * Environment variables
  * ============================
- * PORT
- * CALENDAR_ID
- * GOOGLE_SERVICE_ACCOUNT_EMAIL         – classic SA (JSON key) path (used for shared calendar)
- * GOOGLE_PRIVATE_KEY                   – classic SA private key (escape newlines in .env)
- * SERVICE_ACCOUNT_EMAIL                – keyless SA email (Cloud Run attached)
- * IMPERSONATE_USER                     – Workspace user to impersonate (DWD)
- * USE_DWD                              – "true"/"false": invite attendee; requires DWD when emailing real users
- * USE_MEET                             – 'auto' | 'never' | 'force': control Google Meet creation
+ * PORT                       – API port (default 3000 for local dev)
+ * SERVICE_ACCOUNT_EMAIL      – Cloud Run runtime SA (with DWD enabled)
+ * IMPERSONATE_USER           – Workspace user to act as (email)
+ * CALENDAR_ID                – 'primary' or a specific calendar id/email (default: 'primary')
+ * USE_DWD                    – "true"/"false": whether to include attendees in events
+ * USE_MEET                   – 'auto' | 'never' | 'force'
  * SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY
- * YOUTUBE_API_KEY                      – for /youtube/search
+ * YOUTUBE_API_KEY            – for /youtube/search (optional)
  */
 const {
   PORT = 3000,
-  CALENDAR_ID,
-  GOOGLE_SERVICE_ACCOUNT_EMAIL,
-  GOOGLE_PRIVATE_KEY,
   SERVICE_ACCOUNT_EMAIL,
   IMPERSONATE_USER,
-  USE_DWD = 'false',
+  CALENDAR_ID: CALENDAR_ID_RAW = 'primary',
+  USE_DWD = 'true',
   USE_MEET = 'auto',
   SUPABASE_URL,
   SUPABASE_SERVICE_ROLE_KEY,
   YOUTUBE_API_KEY,
 } = process.env;
 
+const CALENDAR_ID = String(CALENDAR_ID_RAW || 'primary').trim();
 const USE_DWD_BOOL = String(USE_DWD).toLowerCase() === 'true';
 const USE_MEET_MODE = String(USE_MEET || 'auto').toLowerCase(); // 'auto' | 'never' | 'force'
 
-/** Basic app setup */
+/** ===== Express ===== */
 const app = express();
-app.use(cors());
+app.use(cors());               // open CORS; tighten to your domain later
 app.use(express.json());
 
 /** Health check */
-app.get('/health', (_req, res) => {
-  res.json({ ok: true, uptime: process.uptime() });
-});
+app.get('/health', (_req, res) => res.json({ ok: true, uptime: process.uptime() }));
 
-/**
- * ============================
- * Supabase (server-side)
- * ============================
- */
+/** ===== Supabase (server-side) ===== */
 export const supa =
   SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
-    ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
-        auth: { persistSession: false },
-      })
+    ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } })
     : null;
 
-/**
- * ============================
- * Google Calendar auth (classic SA)
- * ============================
- * Use when you’ve shared CALENDAR_ID with GOOGLE_SERVICE_ACCOUNT_EMAIL.
- */
-const jwtClient =
-  GOOGLE_SERVICE_ACCOUNT_EMAIL && GOOGLE_PRIVATE_KEY
-    ? new google.auth.JWT({
-        email: GOOGLE_SERVICE_ACCOUNT_EMAIL,
-        key: GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'), // restore newlines from .env
-        scopes: ['https://www.googleapis.com/auth/calendar'],
-      })
-    : null;
-
-const calendar = google.calendar({
-  version: 'v3',
-  auth: jwtClient || undefined,
-});
-
-/**
- * ============================
- * Google Calendar (keyless DWD)
- * ============================
- * Use when Cloud Run service account has Domain-Wide Delegation to impersonate IMPERSONATE_USER.
- */
-const DWD_SCOPES = ['https://www.googleapis.com/auth/calendar'];
-
-async function getUserAccessTokenKeyless() {
+/** ===== Keyless DWD: delegated Calendar client ===== */
+async function getDelegatedCalendar() {
   if (!SERVICE_ACCOUNT_EMAIL || !IMPERSONATE_USER) {
     throw new Error('Keyless DWD not configured (SERVICE_ACCOUNT_EMAIL, IMPERSONATE_USER)');
   }
+
   const now = Math.floor(Date.now() / 1000);
   const payload = {
     iss: SERVICE_ACCOUNT_EMAIL,
     sub: IMPERSONATE_USER,
-    scope: DWD_SCOPES.join(' '),
+    scope: 'https://www.googleapis.com/auth/calendar',
     aud: 'https://oauth2.googleapis.com/token',
     iat: now,
     exp: now + 3600,
@@ -112,7 +75,7 @@ async function getUserAccessTokenKeyless() {
   const iam = new IAMCredentialsClient();
   const [resp] = await iam.signJwt({ name, payload: JSON.stringify(payload) });
 
-  const res = await fetch('https://oauth2.googleapis.com/token', {
+  const tokRes = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -120,9 +83,12 @@ async function getUserAccessTokenKeyless() {
       assertion: resp.signedJwt,
     }),
   });
-  if (!res.ok) throw new Error(`token exchange failed: ${await res.text()}`);
-  const { access_token } = await res.json();
-  return access_token;
+  if (!tokRes.ok) throw new Error(`token exchange failed: ${await tokRes.text()}`);
+
+  const { access_token } = await tokRes.json();
+  const auth = new google.auth.OAuth2();
+  auth.setCredentials({ access_token });
+  return google.calendar({ version: 'v3', auth });
 }
 
 /* ============================================================
@@ -228,12 +194,8 @@ app.get('/api/me/summary', async (req, res) => {
     const userId = String(req.headers['x-user-id'] || req.query.userId || '');
     if (!userId) return res.status(400).json({ ok: false, error: 'missing_user' });
 
-    const weekStart = new Date();
-    weekStart.setDate(weekStart.getDate() - 6);
-    weekStart.setHours(0, 0, 0, 0);
-    const monthStart = new Date();
-    monthStart.setDate(1);
-    monthStart.setHours(0, 0, 0, 0);
+    const weekStart = new Date(); weekStart.setDate(weekStart.getDate() - 6); weekStart.setHours(0,0,0,0);
+    const monthStart = new Date(); monthStart.setDate(1); monthStart.setHours(0,0,0,0);
 
     const { data: weekData, error: e1 } = await supa
       .from('meditation_logs')
@@ -243,8 +205,7 @@ app.get('/api/me/summary', async (req, res) => {
     if (e1) throw e1;
 
     const weekMinutes = (weekData || []).reduce((a, r) => a + (r.duration_min || 0), 0);
-    const daysThisWeek = new Set((weekData || []).map((r) => new Date(r.started_at).toDateString()))
-      .size;
+    const daysThisWeek = new Set((weekData || []).map(r => new Date(r.started_at).toDateString())).size;
 
     const { data: monthData, error: e2 } = await supa
       .from('meditation_logs')
@@ -270,7 +231,7 @@ app.get('/api/me/summary', async (req, res) => {
 });
 
 /* ============================================================
-   Availability & Bookings (Google Calendar, classic SA)
+   Availability & Bookings (Calendar via keyless DWD)
    ============================================================ */
 
 /** Availability (free/busy) */
@@ -279,10 +240,11 @@ app.get('/api/availability', async (req, res) => {
     const { start, end } = req.query;
     if (!start || !end) return res.status(400).json({ error: 'start and end (ISO) are required' });
 
+    const calendar = await getDelegatedCalendar();
     const fb = await calendar.freebusy.query({
       requestBody: {
-        timeMin: new Date(start).toISOString(),
-        timeMax: new Date(end).toISOString(),
+        timeMin: new Date(String(start)).toISOString(),
+        timeMax: new Date(String(end)).toISOString(),
         items: [{ id: CALENDAR_ID }],
       },
     });
@@ -298,6 +260,8 @@ app.get('/api/availability', async (req, res) => {
 /** Create a booking */
 app.post('/api/book', async (req, res) => {
   try {
+    const calendar = await getDelegatedCalendar();
+
     const { start, end, email, name } = req.body || {};
     if (!start || !end) return res.status(400).json({ error: 'start and end required' });
 
@@ -342,7 +306,7 @@ app.post('/api/book', async (req, res) => {
     const wantMeet = mode === 'virtual' && USE_MEET_MODE !== 'never';
 
     const insert = (body) => calendar.events.insert({
-      calendarId: CALENDAR_ID,
+      calendarId: CALENDAR_ID,        // 'primary' unless you set a specific calendar
       conferenceDataVersion: wantMeet ? 1 : 0,
       sendUpdates,
       requestBody: body,
@@ -360,25 +324,21 @@ app.post('/api/book', async (req, res) => {
       },
     });
 
-    let event, usedMeet = false, hangoutLink = null;
+    let event, usedMeet = false;
 
     if (wantMeet) {
       try {
         const r = await insert({
           ...baseBody,
-          conferenceData: {
-            createRequest: { requestId, conferenceSolutionKey: { type: 'hangoutsMeet' } },
-          },
+          conferenceData: { createRequest: { requestId, conferenceSolutionKey: { type: 'hangoutsMeet' } } },
         });
-        event = r.data;
-        usedMeet = true;
+        event = r.data; usedMeet = true;
       } catch (e) {
         const r1 = await insert(baseBody);
         event = r1.data;
         try {
           const r2 = await patchWithMeet(event.id);
-          event = r2.data;
-          usedMeet = true;
+          event = r2.data; usedMeet = true;
         } catch (e2) {
           if (USE_MEET_MODE === 'force') {
             const msg = e2?.response?.data?.error?.message || e2?.message || 'meet_creation_failed';
@@ -391,9 +351,9 @@ app.post('/api/book', async (req, res) => {
       event = r.data;
     }
 
-    hangoutLink =
-      event.hangoutLink ||
-      (event.conferenceData?.entryPoints || []).find((x) => x?.entryPointType === 'video')?.uri ||
+    const pickMeet = (ev) =>
+      ev.hangoutLink ||
+      (ev.conferenceData?.entryPoints || []).find((x) => x?.entryPointType === 'video')?.uri ||
       null;
 
     res.json({
@@ -404,7 +364,7 @@ app.post('/api/book', async (req, res) => {
       summary: event.summary,
       location: event.location || null,
       usedMeet,
-      hangoutLink,
+      hangoutLink: pickMeet(event),
     });
   } catch (e) {
     console.error('booking_failed:', e?.response?.data || e);
@@ -415,6 +375,8 @@ app.post('/api/book', async (req, res) => {
 /** List bookings */
 app.get('/api/bookings', async (req, res) => {
   try {
+    const calendar = await getDelegatedCalendar();
+
     const { email, maxResults = 50, timeMin, timeMax } = req.query;
 
     const now = new Date();
@@ -430,12 +392,12 @@ app.get('/api/bookings', async (req, res) => {
     });
 
     let items = r.data.items || [];
-    items = items.filter((ev) => ev.status !== 'cancelled');
+    items = items.filter(ev => ev.status !== 'cancelled');
 
     if (email) {
       const want = String(email).toLowerCase();
       items = items.filter((ev) => {
-        const attOk = (ev.attendees || []).some((a) => (a.email || '').toLowerCase() === want);
+        const attOk = (ev.attendees || []).some(a => (a.email || '').toLowerCase() === want);
         const extOk = String(ev.extendedProperties?.private?.userEmail || '').toLowerCase() === want;
         return attOk || extOk;
       });
@@ -459,8 +421,7 @@ app.get('/api/bookings', async (req, res) => {
         attendees: ev.attendees || [],
         userEmail: ev.extendedProperties?.private?.userEmail || null,
         userName: ev.extendedProperties?.private?.userName || null,
-        bookingMode:
-          ev.extendedProperties?.private?.bookingMode || (pickMeet(ev) ? 'virtual' : 'inperson'),
+        bookingMode: ev.extendedProperties?.private?.bookingMode || (pickMeet(ev) ? 'virtual' : 'inperson'),
       })),
     });
   } catch (e) {
@@ -472,6 +433,7 @@ app.get('/api/bookings', async (req, res) => {
 /** Cancel booking */
 app.delete('/api/book/:id', async (req, res) => {
   try {
+    const calendar = await getDelegatedCalendar();
     await calendar.events.delete({
       calendarId: CALENDAR_ID,
       eventId: req.params.id,
@@ -487,6 +449,8 @@ app.delete('/api/book/:id', async (req, res) => {
 /** Amend booking */
 app.patch('/api/book/:id', async (req, res) => {
   try {
+    const calendar = await getDelegatedCalendar();
+
     const { start, end, location } = req.body || {};
     if (!start || !end) return res.status(400).json({ ok: false, error: 'start and end required' });
 
@@ -496,7 +460,7 @@ app.patch('/api/book/:id', async (req, res) => {
       sendUpdates: USE_DWD_BOOL ? 'all' : 'none',
       requestBody: {
         start: { dateTime: new Date(start).toISOString() },
-        end: { dateTime: new Date(end).toISOString() },
+        end:   { dateTime: new Date(end).toISOString() },
         ...(typeof location === 'string' ? { location } : {}),
       },
     });
@@ -515,10 +479,10 @@ app.patch('/api/book/:id', async (req, res) => {
 });
 
 /* ============================================================
-   New endpoints
+   Extra endpoints
    ============================================================ */
 
-/** Create event + Meet via keyless DWD (impersonates IMPERSONATE_USER) */
+/** Keyless DWD event creator on impersonated user's primary calendar */
 app.post('/events', async (req, res) => {
   try {
     const { summary, description, startISO, endISO, attendees = [] } = req.body || {};
@@ -526,10 +490,7 @@ app.post('/events', async (req, res) => {
       return res.status(400).json({ error: 'summary, startISO and endISO are required' });
     }
 
-    const accessToken = await getUserAccessTokenKeyless();
-    const auth = new google.auth.OAuth2();
-    auth.setCredentials({ access_token: accessToken });
-    const cal = google.calendar({ version: 'v3', auth });
+    const calendar = await getDelegatedCalendar();
 
     const event = {
       summary,
@@ -538,14 +499,11 @@ app.post('/events', async (req, res) => {
       end: { dateTime: endISO },
       attendees,
       conferenceData: {
-        createRequest: {
-          requestId: randomUUID(),
-          conferenceSolutionKey: { type: 'hangoutsMeet' },
-        },
+        createRequest: { requestId: randomUUID(), conferenceSolutionKey: { type: 'hangoutsMeet' } },
       },
     };
 
-    const { data } = await cal.events.insert({
+    const { data } = await calendar.events.insert({
       calendarId: 'primary',
       resource: event,
       conferenceDataVersion: 1,
@@ -578,18 +536,14 @@ app.get('/api/youtube', async (req, res) => {
     const parsed = await parseStringPromise(xml, { explicitArray: false, mergeAttrs: true });
     const entries = Array.isArray(parsed.feed.entry)
       ? parsed.feed.entry
-      : parsed.feed.entry
-      ? [parsed.feed.entry]
-      : [];
+      : parsed.feed.entry ? [parsed.feed.entry] : [];
 
     const videos = entries.map((e) => ({
       id: e['yt:videoId'],
       title: e.title,
       link: e.link?.href || `https://www.youtube.com/watch?v=${e['yt:videoId']}`,
       published: e.published,
-      thumb:
-        e['media:group']?.['media:thumbnail']?.url ||
-        `https://i.ytimg.com/vi/${e['yt:videoId']}/hqdefault.jpg`,
+      thumb: e['media:group']?.['media:thumbnail']?.url || `https://i.ytimg.com/vi/${e['yt:videoId']}/hqdefault.jpg`,
     }));
 
     res.json({ videos });
@@ -599,7 +553,7 @@ app.get('/api/youtube', async (req, res) => {
   }
 });
 
-/** YouTube search via Data API v3 */
+/** YouTube search via Data API v3 (optional) */
 app.get('/youtube/search', async (req, res) => {
   try {
     if (!YOUTUBE_API_KEY) return res.status(500).json({ error: 'YOUTUBE_API_KEY not configured' });
@@ -634,7 +588,7 @@ app.get('/youtube/search', async (req, res) => {
   }
 });
 
-/** Start server */
-app.listen(PORT, () => {
-  console.log(`API listening on http://localhost:${PORT}`);
-});
+/** ===== Start server (Cloud Run uses $PORT) ===== */
+app.listen(Number(process.env.PORT || PORT), () =>
+  console.log(`API listening on :${process.env.PORT || PORT} (calendar=${CALENDAR_ID}, dwd=${USE_DWD_BOOL}, meet=${USE_MEET_MODE})`)
+);

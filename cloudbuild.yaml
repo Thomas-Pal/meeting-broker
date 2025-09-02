@@ -1,0 +1,33 @@
+steps:
+  # Step 1: Build container using Buildpacks
+  - name: gcr.io/k8s-skaffold/pack
+    entrypoint: pack
+    args:
+      - build
+      - "$_IMAGE"
+      - --path
+      - .
+      - --builder
+      - gcr.io/buildpacks/builder
+      - --publish
+
+  # Step 2: Deploy to Cloud Run
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - meeting-broker
+      - --image
+      - "$_IMAGE"
+      - --region
+      - europe-west2
+      - --platform
+      - managed
+      - --allow-unauthenticated
+
+substitutions:
+  _IMAGE: europe-west2-docker.pkg.dev/level-array-470911-t3/innerpeace/meeting
+
+options:
+  logging: CLOUD_LOGGING_ONLY

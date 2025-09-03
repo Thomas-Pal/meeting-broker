@@ -47,7 +47,7 @@ steps:
           --set-env-vars=IMPERSONATE_USER=${_IMPERSONATE_USER} \
           --set-env-vars=CALENDAR_ID=${_CALENDAR_ID} \
           --allow-unauthenticated \
-          --timeout=600 \
+          --timeout=2000\
           --quiet
 
 images:

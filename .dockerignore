@@ -1,0 +1,11 @@
+node_modules
+dist
+.git
+.github
+.gitignore
+Dockerfile
+cloudbuild.yaml
+npm-debug.log*
+.yarn
+.pnpm-store
+.env

@@ -2,11 +2,9 @@ options:
   logging: CLOUD_LOGGING_ONLY
 timeout: "1200s"
 
-# Keep IMAGE present so the old trigger stops complaining,
-# but give it a literal value (no $variables) and DO NOT use it.
 substitutions:
   _REGION: "europe-west2"
-  _AR_REPO: "innerpeace"
+  _AR_REPO: "innerpeace" # name of your Artifact Registry repo
   _SERVICE: "meeting-broker"
   _RUNTIME_SA: "bookings-bot@level-array-470911-t3.iam.gserviceaccount.com"
 
@@ -34,9 +32,8 @@ steps:
       - -lc
       - |
         set -euo pipefail
-        IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA"
         gcloud run deploy "${_SERVICE}" \
-          --image="${IMAGE}" \
+          --image="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA" \
           --region="${_REGION}" \
           --platform=managed \
           --allow-unauthenticated \

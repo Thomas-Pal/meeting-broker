@@ -1,27 +1,9 @@
 {
-  "name": "meeting-broker",
-  "version": "2.0.0",
-  "private": true,
-  "description": "Minimal Cloud Run service (Express) with optional Google Calendar adapter",
-  "engines": {
-    "node": ">=20"
-  },
   "type": "commonjs",
-  "main": "dist/server.js",
+  "main": "dist/index.js",
   "scripts": {
-    "gcp-build": "npm run build",
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/server.js",
-    "dev": "tsx watch src/server.ts"
-  },
-  "dependencies": {
-    "express": "^4.19.2",
-    "googleapis": "^140.0.1",
-    "google-auth-library": "^9.14.1"
-  },
-  "devDependencies": {
-    "typescript": "^5.5.4",
-    "tsx": "^4.19.1",
-    "@types/express": "^4.17.21"
+    "start": "node dist/index.js",
+    "gcp-build": "npm run build"
   }
 }

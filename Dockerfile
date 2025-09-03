@@ -1,15 +1,19 @@
-# build stage
-FROM node:20-slim AS build
-WORKDIR /app
-COPY package*.json ./
-RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
-COPY . .
-RUN npm run build && npm prune --omit=dev
-
-# runtime
+# Node 20 LTS is a safe target for google-auth + ESM
 FROM node:20-slim
+
 ENV NODE_ENV=production
 WORKDIR /app
-COPY --from=build /app /app
+
+# Install deps
+COPY package*.json ./
+RUN npm ci --omit=dev
+
+# Copy source
+COPY . .
+
+# Cloud Run will set $PORT; your app already reads it
+ENV PORT=8080
 EXPOSE 8080
-CMD ["node","dist/index.js"]   # ← entry point
+
+# Start the server (uses "type": "module" fine)
+CMD ["node", "index.js"]

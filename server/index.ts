@@ -1,5 +1,5 @@
 import express from "express";
-import { getCalendarClient } from "./googleCalender";
+import { getCalendarClient } from "./auth/calendarCleint";
 
 const app = express();
 

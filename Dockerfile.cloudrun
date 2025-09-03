@@ -1,0 +1,19 @@
+FROM node:20-alpine
+
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+
+COPY . .
+
+# Try a build if it exists; don't fail if it doesn't
+RUN npm run -s build || echo "no build script"
+# If build step succeeded, you can safely drop dev deps
+RUN npm prune --omit=dev || true
+
+ENV NODE_ENV=production
+ENV PORT=8080
+EXPOSE 8080
+
+# Prefer npm start; if it's missing, fall back to common entry
+CMD [ "sh", "-lc", "npm start || node server/index.js || node index.js" ]

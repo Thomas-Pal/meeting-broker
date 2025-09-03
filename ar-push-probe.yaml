@@ -1,0 +1,17 @@
+options:
+  logging: CLOUD_LOGGING_ONLY
+substitutions:
+  _REGION: europe-west2
+  _REPO: innerpeace
+steps:
+- name: gcr.io/cloud-builders/gcloud
+  entrypoint: bash
+  args: ['-lc','echo "== WHO AM I =="; gcloud auth list; gcloud config list account']
+- name: gcr.io/cloud-builders/gcloud
+  args: ['auth','configure-docker','${_REGION}-docker.pkg.dev','-q']
+- name: gcr.io/cloud-builders/docker
+  args: ['pull','alpine:3.19']
+- name: gcr.io/cloud-builders/docker
+  args: ['tag','alpine:3.19','${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/probe:latest']
+- name: gcr.io/cloud-builders/docker
+  args: ['push','${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/probe:latest']

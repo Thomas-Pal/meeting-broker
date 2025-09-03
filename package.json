@@ -5,5 +5,15 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "gcp-build": "npm run build"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/node": "^24.3.0",
+    "typescript": "^5.9.2"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "google-auth-library": "^10.3.0",
+    "googleapis": "^159.0.0"
   }
 }

@@ -1,51 +1,63 @@
 // server/index.ts
 import 'dotenv/config';
-import express from 'express';
+import express, { Request, Response } from 'express';
 import cors from 'cors';
 import { v4 as uuid } from 'uuid';
-import { makeCalendarClient } from './auth/calendarClient'; // no .js in TS import
+
+// Uses your existing helper (typo kept intentionally)
+import { getCalendarClient, type AuthMode } from './auth/calendarClient';
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// --- Env ---
+// ---- Env ----
 const {
   PORT = '8080',
-  CALENDAR_ID,              // calendar email/id you manage (primary or resource)
-  USE_MEET = 'auto',        // 'auto' | 'never' | 'force'
+  CALENDAR_ID,                 // calendar email/id to manage (user or resource)
+  USE_MEET = 'auto',           // 'auto' | 'never' | 'force'
 } = process.env;
 
+// AUTH_MODE is whatever your helper expects; coerce the env to its type
+//const AUTH_MODE = (process.env.AUTH_MODE || 'workload') as unknown as AuthMode;
+
+const AUTH_MODE: AuthMode = ((): AuthMode => {
+  const raw = String(process.env.AUTH_MODE || 'workload').toLowerCase();
+  // adjust this list if your calendarCleint defines different modes
+  const allowed = new Set<AuthMode>(['workload', 'adc', 'key', 'impersonate'] as unknown as AuthMode[]);
+  return (allowed.has(raw as AuthMode) ? (raw as AuthMode) : ('workload' as AuthMode));
+})();
+
 if (!CALENDAR_ID) {
-  // Don’t crash; log loudly so Cloud Run logs make it obvious
   console.error('❗ Missing env: CALENDAR_ID');
 }
 
 const WANT_MEET = String(USE_MEET || 'auto').toLowerCase(); // 'auto' | 'never' | 'force'
 
-// --- Health ---
-app.get('/health', (_req, res) => {
-  res.json({ ok: true, uptime: process.uptime(), mode: 'CloudRun+DWD' });
+// ---- Health ----
+app.get('/health', (_req: Request, res: Response) => {
+  res.json({ ok: true, uptime: process.uptime(), mode: 'CloudRun' });
 });
 
-// --- Availability: busy blocks between start & end (ISO strings) ---
-app.get('/api/availability', async (req, res) => {
+// ---- Availability: busy blocks between start & end (ISO strings) ----
+app.get('/api/availability', async (req: Request, res: Response) => {
   try {
-    const { start, end } = req.query as { start?: string; end?: string };
+    const start = String(req.query.start || '');
+    const end   = String(req.query.end || '');
     if (!start || !end) {
       return res.status(400).json({ error: 'start and end (ISO) are required' });
     }
 
-    const calendar = await makeCalendarClient();
+    const calendar = await getCalendarClient(AUTH_MODE);
     const fb = await calendar.freebusy.query({
       requestBody: {
         timeMin: new Date(start).toISOString(),
         timeMax: new Date(end).toISOString(),
-        items: [{ id: CALENDAR_ID! }],
-      },
+        items: [{ id: CALENDAR_ID! }]
+      }
     });
 
-    const busy = fb.data.calendars?.[String(CALENDAR_ID)]?.busy || [];
+    const busy = (fb.data.calendars?.[String(CALENDAR_ID)]?.busy ?? []) as any[];
     res.json({ busy });
   } catch (e: any) {
     console.error('freebusy_failed:', e?.response?.data || e);
@@ -53,22 +65,17 @@ app.get('/api/availability', async (req, res) => {
   }
 });
 
-// --- Create booking (+ optional Google Meet) ---
-/*
-  POST /api/book
-  body: {
-    start: ISO, end: ISO,
-    email?: string, name?: string,
-    mode?: 'virtual'|'inperson',
-    location?: string
-  }
-*/
-app.post('/api/book', async (req, res) => {
+// ---- Create booking (+ optional Google Meet) ----
+// body: { start, end, email?, name?, mode?: 'virtual'|'inperson', location?: string }
+app.post('/api/book', async (req: Request, res: Response) => {
   try {
-    const { start, end, email, name } = req.body || {};
+    const { start, end, email, name } = (req.body || {}) as {
+      start?: string; end?: string; email?: string; name?: string; mode?: string; location?: string;
+    };
+
     if (!start || !end) return res.status(400).json({ error: 'start and end required' });
 
-    const calendar = await makeCalendarClient();
+    const calendar = await getCalendarClient(AUTH_MODE);
 
     const mode = String(req.body?.mode || 'virtual').toLowerCase() === 'inperson' ? 'inperson' : 'virtual';
     const locationInput = (req.body?.location || '').trim();
@@ -94,7 +101,7 @@ app.post('/api/book', async (req, res) => {
       attendees: email ? [{ email, displayName: name || undefined }] : undefined,
       guestsCanModify: false,
       guestsCanInviteOthers: false,
-      guestsCanSeeOtherGuests: false,
+      guestsCanSeeOtherGuests: false
     };
 
     const wantMeet = mode === 'virtual' && WANT_MEET !== 'never';
@@ -104,7 +111,7 @@ app.post('/api/book', async (req, res) => {
       calendarId: String(CALENDAR_ID),
       conferenceDataVersion: wantMeet ? 1 : 0,
       sendUpdates,
-      requestBody: body,
+      requestBody: body
     });
 
     const patchWithMeet = (eventId: string) => calendar.events.patch({
@@ -114,9 +121,9 @@ app.post('/api/book', async (req, res) => {
       sendUpdates,
       requestBody: {
         conferenceData: {
-          createRequest: { requestId, conferenceSolutionKey: { type: 'hangoutsMeet' } },
-        },
-      },
+          createRequest: { requestId, conferenceSolutionKey: { type: 'hangoutsMeet' } }
+        }
+      }
     });
 
     let event: any, usedMeet = false;
@@ -127,13 +134,13 @@ app.post('/api/book', async (req, res) => {
         const r = await insert({
           ...baseBody,
           conferenceData: {
-            createRequest: { requestId, conferenceSolutionKey: { type: 'hangoutsMeet' } },
-          },
+            createRequest: { requestId, conferenceSolutionKey: { type: 'hangoutsMeet' } }
+          }
         });
         event = r.data;
         usedMeet = true;
       } catch {
-        // Fallback: create then patch Meet (handles calendars that reject direct createRequest)
+        // Fallback: create then patch Meet
         const r1 = await insert(baseBody);
         event = r1.data;
         try {
@@ -165,7 +172,7 @@ app.post('/api/book', async (req, res) => {
       summary: event.summary,
       location: event.location || null,
       usedMeet,
-      hangoutLink,
+      hangoutLink
     });
   } catch (e: any) {
     console.error('booking_failed:', e?.response?.data || e);
@@ -173,14 +180,14 @@ app.post('/api/book', async (req, res) => {
   }
 });
 
-// --- List bookings (filter by attendee email optionally) ---
-app.get('/api/bookings', async (req, res) => {
+// ---- List bookings (optionally filter by attendee email) ----
+app.get('/api/bookings', async (req: Request, res: Response) => {
   try {
     const { email, maxResults = 50, timeMin, timeMax } = req.query as {
       email?: string; maxResults?: string | number; timeMin?: string; timeMax?: string;
     };
 
-    const calendar = await makeCalendarClient();
+    const calendar = await getCalendarClient(AUTH_MODE);
     const now = new Date();
     const defaultMax = new Date(now.getTime() + 90 * 86400000);
 
@@ -226,10 +233,10 @@ app.get('/api/bookings', async (req, res) => {
   }
 });
 
-// --- Delete booking ---
-app.delete('/api/book/:id', async (req, res) => {
+// ---- Delete booking ----
+app.delete('/api/book/:id', async (req: Request, res: Response) => {
   try {
-    const calendar = await makeCalendarClient();
+    const calendar = await getCalendarClient(AUTH_MODE);
     await calendar.events.delete({
       calendarId: String(CALENDAR_ID),
       eventId: req.params.id,
@@ -242,13 +249,13 @@ app.delete('/api/book/:id', async (req, res) => {
   }
 });
 
-// --- Update booking time/location ---
-app.patch('/api/book/:id', async (req, res) => {
+// ---- Update booking time/location ----
+app.patch('/api/book/:id', async (req: Request, res: Response) => {
   try {
-    const { start, end, location } = req.body || {};
+    const { start, end, location } = (req.body || {}) as { start?: string; end?: string; location?: string };
     if (!start || !end) return res.status(400).json({ ok: false, error: 'start and end required' });
 
-    const calendar = await makeCalendarClient();
+    const calendar = await getCalendarClient(AUTH_MODE);
     const updated = await calendar.events.patch({
       calendarId: String(CALENDAR_ID),
       eventId: req.params.id,
@@ -273,7 +280,20 @@ app.patch('/api/book/:id', async (req, res) => {
   }
 });
 
-// --- Start ---
-app.listen(Number(PORT), () => {
+// ---- Dev-only: list registered routes (remove if you like) ----
+if (process.env.NODE_ENV !== 'production') {
+  // @ts-ignore
+  app.get('/__routes', (_req: Request, res: Response) => {
+    // @ts-ignore
+    const stack = (app as any)._router?.stack || [];
+    const routes = stack
+      .filter((l: any) => l.route)
+      .map((l: any) => ({ methods: Object.keys(l.route.methods), path: l.route.path }));
+    res.json(routes);
+  });
+}
+
+// ---- Start ----
+app.listen(Number(PORT), '0.0.0.0', () => {
   console.log(`API listening on :${PORT}`);
 });

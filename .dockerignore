@@ -1,11 +1,7 @@
 node_modules
-dist
+npm-debug.log
+Dockerfile*
+.dockerignore
 .git
-.github
 .gitignore
-Dockerfile
-cloudbuild.yaml
-npm-debug.log*
-.yarn
-.pnpm-store
-.env
+dist

@@ -1,6 +1,6 @@
 {
   "compilerOptions": {
-    "rootDir": "src",
+    "rootDir": "server",
     "outDir": "dist",
     "module": "commonjs",
     "target": "ES2022",
@@ -9,5 +9,5 @@
     "esModuleInterop": true,
     "skipLibCheck": true
   },
-  "include": ["src/**/*", "server/index.ts", "server/auth/calendarCleint.ts"]
+  "include": ["server/**/*.ts"]
 }

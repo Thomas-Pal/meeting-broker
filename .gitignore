@@ -5,3 +5,245 @@ node_modules
 dist
 *.log
 .DS_Store
+
+
+#!/usr/bin/env bash
+set -euo pipefail
+
+#############
+# SETTINGS  #
+#############
+PROJECT_ID="southern-field-471010-d6"
+REGION="europe-west2"
+SERVICE="innerpeace-api"
+AR_REPO="innerpeace"               # Artifact Registry repo name
+RUNTIME_SA_NAME="run-innerpeace-sa"
+
+# GitHub trigger settings
+GITHUB_OWNER="Thomas-Pal"
+GITHUB_REPO="Thomas-Pal/meeting-broker"     # repo that contains the `server/` folder
+BRANCH_REGEX="^main$"
+
+# App config (secrets). Put your real values here.
+CALENDAR_ID_VALUE="thomaspal@innerpeace-developer.co.uk"
+GOOGLE_DELEGATED_USER_VALUE="thomaspal@innerpeace-developer.co.uk"
+USE_MEET_VALUE="auto" # 'auto' | 'never' | 'force'
+
+########################
+# Derive handy values  #
+########################
+echo "⏳ Configuring gcloud..."
+gcloud config set project "$PROJECT_ID" >/dev/null
+PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
+RUNTIME_SA="${RUNTIME_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+CLOUD_BUILD_SA="${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com"
+AR_HOST="${REGION}-docker.pkg.dev"
+
+echo "• Project:          $PROJECT_ID ($PROJECT_NUMBER)"
+echo "• Region:           $REGION"
+echo "• Service:          $SERVICE"
+echo "• Runtime SA:       $RUNTIME_SA"
+echo "• Cloud Build SA:   $CLOUD_BUILD_SA"
+echo "• Artifact Host:    $AR_HOST"
+echo "• Repo:             $GITHUB_OWNER/$GITHUB_REPO  branch: $BRANCH_REGEX"
+echo
+
+################################
+# 1) Enable required services  #
+################################
+echo "🔧 Enabling APIs..."
+gcloud services enable \
+  run.googleapis.com \
+  cloudbuild.googleapis.com \
+  artifactregistry.googleapis.com \
+  secretmanager.googleapis.com \
+  iamcredentials.googleapis.com \
+  calendar-json.googleapis.com
+
+########################################
+# 2) Artifact Registry (idempotent)    #
+########################################
+echo "📦 Ensuring Artifact Registry exists..."
+if ! gcloud artifacts repositories describe "$AR_REPO" --location "$REGION" >/dev/null 2>&1; then
+  gcloud artifacts repositories create "$AR_REPO" \
+    --location="$REGION" \
+    --repository-format=DOCKER \
+    --description="InnerPeace containers"
+else
+  echo "• $AR_REPO already exists."
+fi
+
+########################################
+# 3) Runtime service account + IAM     #
+########################################
+echo "👤 Creating runtime service account (if needed)..."
+gcloud iam service-accounts describe "$RUNTIME_SA" >/dev/null 2>&1 || \
+gcloud iam service-accounts create "$RUNTIME_SA_NAME" \
+  --display-name="Cloud Run runtime for $SERVICE"
+
+echo "🔐 Granting least-privilege roles..."
+# Cloud Build can deploy to Run and push to Artifact Registry
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${CLOUD_BUILD_SA}" \
+  --role="roles/run.admin" >/dev/null
+
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${CLOUD_BUILD_SA}" \
+  --role="roles/artifactregistry.writer" >/dev/null
+
+# Cloud Build can act as the runtime SA (to attach it on deploy)
+gcloud iam service-accounts add-iam-policy-binding "$RUNTIME_SA" \
+  --member="serviceAccount:${CLOUD_BUILD_SA}" \
+  --role="roles/iam.serviceAccountUser" >/dev/null
+
+# Runtime can read secrets (+ optional tracing)
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${RUNTIME_SA}" \
+  --role="roles/secretmanager.secretAccessor" >/dev/null
+
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${RUNTIME_SA}" \
+  --role="roles/cloudtrace.agent" >/dev/null || true
+
+########################################
+# 4) Secrets (values + bindings)       #
+########################################
+echo "🗝️  Creating secrets (idempotent) and adding versions..."
+create_if_missing () {
+  local name="$1"
+  gcloud secrets describe "$name" >/dev/null 2>&1 || gcloud secrets create "$name" >/dev/null
+  # Bind runtime SA to each secret
+  gcloud secrets add-iam-policy-binding "$name" \
+    --member="serviceAccount:${RUNTIME_SA}" \
+    --role="roles/secretmanager.secretAccessor" >/dev/null
+}
+
+for S in CALENDAR_ID GOOGLE_SERVICE_ACCOUNT_EMAIL GOOGLE_DELEGATED_USER USE_MEET; do
+  create_if_missing "$S"
+done
+
+printf "%s" "$CALENDAR_ID_VALUE"            | gcloud secrets versions add CALENDAR_ID --data-file=- >/dev/null
+printf "%s" "$RUNTIME_SA"                  | gcloud secrets versions add GOOGLE_SERVICE_ACCOUNT_EMAIL --data-file=- >/dev/null
+printf "%s" "$GOOGLE_DELEGATED_USER_VALUE" | gcloud secrets versions add GOOGLE_DELEGATED_USER --data-file=- >/dev/null
+printf "%s" "$USE_MEET_VALUE"              | gcloud secrets versions add USE_MEET --data-file=- >/dev/null
+
+########################################
+# 5) One-shot build+deploy from source #
+########################################
+# This proves the service works before wiring CI/CD.
+echo "🚀 Deploying once from local source (buildpacks) to verify..."
+gcloud run deploy "$SERVICE" \
+  --source=server \
+  --region="$REGION" \
+  --service-account="$RUNTIME_SA" \
+  --allow-unauthenticated \
+  --min-instances=1 \
+  --max-instances=20 \
+  --concurrency=80 \
+  --timeout=120 \
+  --set-secrets="CALENDAR_ID=CALENDAR_ID:latest,GOOGLE_SERVICE_ACCOUNT_EMAIL=GOOGLE_SERVICE_ACCOUNT_EMAIL:latest,GOOGLE_DELEGATED_USER=GOOGLE_DELEGATED_USER:latest,USE_MEET=USE_MEET:latest"
+
+# Make sure it's publicly invokable (idempotent)
+gcloud run services add-iam-policy-binding "$SERVICE" \
+  --region="$REGION" \
+  --member="allUsers" \
+  --role="roles/run.invoker" >/dev/null || true
+
+URL="$(gcloud run services describe "$SERVICE" --region="$REGION" --format='value(status.url)')"
+echo "✅ Live URL: $URL"
+echo "Health: $URL/health"
+echo
+
+##############################################################
+# 6) Continuous delivery with Cloud Build + GitHub trigger   #
+##############################################################
+# Create a Cloud Build file in the repo root (if not present).
+# It builds a container from ./server, pushes to Artifact Registry,
+# and deploys to Cloud Run with the runtime SA + secrets.
+
+if [ ! -f cloudbuild.yaml ]; then
+  echo "🧱 Writing cloudbuild.yaml to current directory..."
+  cat > cloudbuild.yaml <<'YAML'
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+substitutions:
+  _REGION: europe-west2
+  _REPO: innerpeace
+  _SERVICE: innerpeace-api
+  _RUNTIME_SA: run-innerpeace-sa@$_PROJECT_ID.iam.gserviceaccount.com
+
+steps:
+# Authenticate docker to Artifact Registry
+- name: gcr.io/cloud-builders/gcloud
+  args: ['auth','configure-docker','${_REGION}-docker.pkg.dev','-q']
+
+# Build image from the server/ directory
+- name: gcr.io/cloud-builders/docker
+  args: ['build','-t','${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:${SHORT_SHA}','server']
+
+# Push image
+- name: gcr.io/cloud-builders/docker
+  args: ['push','${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:${SHORT_SHA}']
+
+# Deploy to Cloud Run
+- name: gcr.io/cloud-builders/gcloud
+  args:
+    [
+      'run','deploy','${_SERVICE}',
+      '--image','${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:${SHORT_SHA}',
+      '--region','${_REGION}',
+      '--platform','managed',
+      '--service-account','${_RUNTIME_SA}',
+      '--allow-unauthenticated',
+      '--min-instances','1',
+      '--max-instances','20',
+      '--concurrency','80',
+      '--timeout','120',
+      '--set-secrets',
+      'CALENDAR_ID=CALENDAR_ID:latest,GOOGLE_SERVICE_ACCOUNT_EMAIL=GOOGLE_SERVICE_ACCOUNT_EMAIL:latest,GOOGLE_DELEGATED_USER=GOOGLE_DELEGATED_USER:latest,USE_MEET=USE_MEET:latest'
+    ]
+
+images:
+- '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:${SHORT_SHA}'
+YAML
+else
+  echo "• cloudbuild.yaml already exists; skipping file write."
+fi
+
+# NOTE: The substitution _RUNTIME_SA uses $_PROJECT_ID which Cloud Build injects.
+# If you want to hardcode the SA email, replace that line accordingly.
+
+echo "🔁 Creating Cloud Build GitHub trigger..."
+# Will prompt to install/authorize the Cloud Build GitHub App if not connected yet.
+TRIGGER_NAME="${SERVICE}-cd"
+if ! gcloud beta builds triggers describe "$TRIGGER_NAME" >/dev/null 2>&1; then
+  gcloud beta builds triggers create github \
+    --name="$TRIGGER_NAME" \
+    --repo-owner="$GITHUB_OWNER" \
+    --repo-name="$GITHUB_REPO" \
+    --branch-pattern="$BRANCH_REGEX" \
+    --build-config="cloudbuild.yaml" \
+    --substitutions="_REGION=${REGION},_REPO=${AR_REPO},_SERVICE=${SERVICE}"
+else
+  echo "• Trigger $TRIGGER_NAME already exists."
+fi
+
+echo "▶️ Kicking off a build from the current tip of main (if accessible)..."
+gcloud beta builds triggers run "$TRIGGER_NAME" --branch="main" || true
+
+##############################################
+# 7) Workspace DWD: get client ID for Admin  #
+##############################################
+echo
+echo "🔑 Workspace DWD step (manual, outside GCP):"
+UNIQUE_ID="$(gcloud iam service-accounts describe "$RUNTIME_SA" --format='value(uniqueId)')"
+echo "• Service Account UNIQUE (OAuth client) ID: $UNIQUE_ID"
+echo "In Google Admin: Security → Access & data control → API controls → Domain-wide delegation → Add new:"
+echo "  Client ID: $UNIQUE_ID"
+echo "  Scopes:    https://www.googleapis.com/auth/calendar"
+echo
+echo "🗓️ Also share the Calendar ($CALENDAR_ID_VALUE) with:"
+echo "  ${RUNTIME_SA}  → permission: Make changes to events"
+echo
+echo "All set. Push to $GITHUB_OWNER/$GITHUB_REPO ($BRANCH_REGEX) to auto-build & deploy."

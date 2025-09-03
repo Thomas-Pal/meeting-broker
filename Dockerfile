@@ -1,9 +1,21 @@
-FROM node:20-slim
-ENV NODE_ENV=production
+# Dockerfile
+FROM node:20-alpine
+
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci --omit=dev
+# install dev deps so we can compile TS
+RUN npm ci
+
+# copy code and build
 COPY . .
+RUN npm run -s build
+
+# prune dev deps after build for a slim runtime
+RUN npm prune --omit=dev
+
+ENV NODE_ENV=production
 ENV PORT=8080
 EXPOSE 8080
-CMD ["node","index.js"]
+
+# use the start script: node dist/index.js
+CMD ["npm","start"]

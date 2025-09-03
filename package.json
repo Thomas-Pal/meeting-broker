@@ -1,33 +1,27 @@
 {
   "name": "meeting-broker",
-  "version": "1.0.0",
-  "description": "Express API for calendar bookings, Supabase logs, YouTube feeds, and Meet link generation",
-  "main": "dist/index.js",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Minimal Cloud Run service (Express) with optional Google Calendar adapter",
+  "engines": {
+    "node": ">=20"
+  },
   "type": "commonjs",
+  "main": "dist/server.js",
   "scripts": {
-    "dev": "ts-node --esm src/index.ts || node dist/index.js",
-    "build": "tsc",
-    "start": "node dist/index.js"
+    "gcp-build": "npm run build",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "dev": "tsx watch src/server.ts"
   },
   "dependencies": {
-    "@google-cloud/iam-credentials": "^4.2.0",
-    "@supabase/supabase-js": "^2.39.8",
-    "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
     "express": "^4.19.2",
-    "googleapis": "^144.0.0",
-    "uuid": "^9.0.1",
-    "xml2js": "^0.6.2"
-  },
-  "engines": {
-    "node": ">=18"
+    "googleapis": "^140.0.1",
+    "google-auth-library": "^9.14.1"
   },
   "devDependencies": {
-    "@types/cors": "^2.8.19",
-    "@types/express": "^5.0.3",
-    "@types/node": "^24.3.0",
-    "@types/uuid": "^10.0.0",
-    "@types/xml2js": "^0.4.14",
-    "typescript": "^5.9.2"
+    "typescript": "^5.5.4",
+    "tsx": "^4.19.1",
+    "@types/express": "^4.17.21"
   }
 }

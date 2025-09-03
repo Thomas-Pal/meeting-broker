@@ -6,12 +6,11 @@
   "type": "module",
   "scripts": {
     "dev": "node --watch index.js",
-      "build": "tsc",
+    "build": "tsc",
     "start": "node index.js"
-
   },
   "dependencies": {
-    "@google-cloud/iam-credentials": "^4.4.0",
+    "@google-cloud/iam-credentials": "^4.2.0",
     "@supabase/supabase-js": "^2.39.8",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",

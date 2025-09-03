@@ -27,7 +27,7 @@ steps:
       - --allow-unauthenticated
 
 substitutions:
-  _IMAGE: europe-west2-docker.pkg.dev/level-array-470911-t3/innerpeace/meeting
+  _IMAGE: europe-west2-docker.pkg.dev/level-array-470911-t3/innerpeace/meeting-broker:$SHORT_SHA
 
 options:
   logging: CLOUD_LOGGING_ONLY

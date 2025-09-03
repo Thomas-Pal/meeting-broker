@@ -6,7 +6,9 @@
   "type": "module",
   "scripts": {
     "dev": "node --watch index.js",
+      "build": "tsc",
     "start": "node index.js"
+
   },
   "dependencies": {
     "@google-cloud/iam-credentials": "^4.4.0",

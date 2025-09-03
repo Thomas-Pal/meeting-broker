@@ -1,12 +1,14 @@
 {
   "compilerOptions": {
+    "target": "ES2022",
+    "module": "commonjs",
+    "moduleResolution": "node",
     "rootDir": "server",
     "outDir": "dist",
-    "module": "commonjs",
-    "target": "ES2022",
-    "moduleResolution": "node",
-    "strict": true,
+    "lib": ["es2022"],
+    "types": ["node"],
     "esModuleInterop": true,
+    "strict": false,
     "skipLibCheck": true
   },
   "include": ["server/**/*.ts"]

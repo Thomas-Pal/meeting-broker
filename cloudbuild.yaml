@@ -1,30 +1,32 @@
+options:
+  logging: CLOUD_LOGGING_ONLY
+
 substitutions:
   _REGION: europe-west2
   _REPO: innerpeace
-  _SERVICE: meeting-broker
-  _IMAGE: ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}
-  _RUNTIME_SA: ${_SERVICE}-runner@${PROJECT_ID}.iam.gserviceaccount.com
+  _IMAGE: innerpeace-api
 
 steps:
-  - name: gcr.io/cloud-builders/docker
-    args: ["build","-t","${_IMAGE}:$SHORT_SHA","server"]
+- name: gcr.io/cloud-builders/gcloud
+  args: ['auth','configure-docker','${_REGION}-docker.pkg.dev','-q']
 
-  - name: gcr.io/cloud-builders/docker
-    args: ["push","${_IMAGE}:$SHORT_SHA"]
+- name: gcr.io/cloud-builders/docker
+  args: ['build','-t','${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:${SHORT_SHA}','.']
 
-  - name: gcr.io/cloud-builders/gcloud
-    args:
-      [
-        "run","deploy","${_SERVICE}",
-        "--region","${_REGION}",
-        "--image","${_IMAGE}:$SHORT_SHA",
-        "--service-account","${_RUNTIME_SA}",
-        "--allow-unauthenticated",
-        "--set-env-vars","CALENDAR_ID=REPLACE_CALENDAR_ID",
-        "--set-env-vars","USE_MEET=auto",
-        "--set-env-vars","GOOGLE_SERVICE_ACCOUNT_EMAIL=REPLACE_SA_EMAIL",
-        "--set-env-vars","GOOGLE_DELEGATED_USER=REPLACE_USER_EMAIL"
-      ]
+- name: gcr.io/cloud-builders/docker
+  args: ['push','${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:${SHORT_SHA}']
 
-images:
-  - "${_IMAGE}:$SHORT_SHA"
+# Resolve digest, then deploy BY DIGEST (no tag drift)
+- name: gcr.io/cloud-builders/gcloud
+  entrypoint: bash
+  args:
+    - -lc
+    - |
+      IMG="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}"
+      DIGEST="$(gcloud artifacts docker tags list "$IMG" --filter="tag:${SHORT_SHA}" --format='value(digest)')"
+      gcloud run deploy ${_IMAGE} \
+        --region=${_REGION} \
+        --image="${IMG}@${DIGEST}" \
+        --service-account="run-innerpeace-sa@$PROJECT_ID.iam.gserviceaccount.com" \
+        --min-instances=1 --max-instances=20 --concurrency=80 --timeout=240 \
+        --set-secrets="CALENDAR_ID=CALENDAR_ID:latest,GOOGLE_SERVICE_ACCOUNT_EMAIL=GOOGLE_SERVICE_ACCOUNT_EMAIL:latest,GOOGLE_DELEGATED_USER=GOOGLE_DELEGATED_USER:latest,USE_MEET=USE_MEET:latest"

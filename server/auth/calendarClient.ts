@@ -1,72 +1,81 @@
 // server/auth/calendarClient.ts
 import { google, calendar_v3 } from 'googleapis';
-import { JWT } from 'google-auth-library';
 
-export type AuthMode = 'workload' | 'adc' | 'key' | 'impersonate';
+export type AuthMode = 'keyless-dwd' | 'adc' | 'key';
 
-/**
- * Returns an authenticated Google Calendar client.
- *
- * Modes:
- *  - 'key' | 'impersonate': use SA key (env or file). If GOOGLE_DELEGATED_USER is set, do DWD.
- *  - 'workload' | 'adc':    use Application Default Credentials (Cloud Run SA). No DWD here.
- *
- * Env it can read:
- *  GOOGLE_CREDENTIALS            raw JSON of SA key
- *  GOOGLE_CREDENTIALS_B64        base64-encoded JSON of SA key
- *  GOOGLE_APPLICATION_CREDENTIALS path to SA key file (JSON)
- *  GOOGLE_DELEGATED_USER         user@domain for DWD (only with SA key)
- */
-export async function getCalendarClient(
-  mode: AuthMode = 'workload'
-): Promise<calendar_v3.Calendar> {
+export async function getCalendarClient(mode: AuthMode = 'keyless-dwd'): Promise<calendar_v3.Calendar> {
   const scopes = ['https://www.googleapis.com/auth/calendar'];
-  const delegatedUser = process.env.GOOGLE_DELEGATED_USER || undefined;
+  const delegatedUser = process.env.GOOGLE_DELEGATED_USER || '';
+  const dwdSaEmail = process.env.DWD_SA_EMAIL || '';
 
-  // Prefer explicit key when requested or present
+  // If a legacy key was ever provided, honor it (not used in your setup).
   const rawJson =
     process.env.GOOGLE_CREDENTIALS ||
     (process.env.GOOGLE_CREDENTIALS_B64
       ? Buffer.from(process.env.GOOGLE_CREDENTIALS_B64, 'base64').toString('utf8')
       : undefined);
 
-  const wantKey =
-    mode === 'key' || mode === 'impersonate' || !!rawJson || !!process.env.GOOGLE_APPLICATION_CREDENTIALS;
-
-  if (wantKey) {
-    if (rawJson) {
-      const key = JSON.parse(rawJson);
-      let privateKey: string = key.private_key;
-      if (privateKey?.includes('\\n')) privateKey = privateKey.replace(/\\n/g, '\n');
-
-      const jwt = new JWT({
-        email: key.client_email,
-        key: privateKey,
-        scopes,
-        subject: delegatedUser, // DWD if provided
-      });
-
-      return google.calendar({ version: 'v3', auth: jwt });
-    }
-
-    // Key via file path (still SA creds). Use GoogleAuth but pass the *GoogleAuth* instance to google.calendar.
-    const auth = new google.auth.GoogleAuth({
+  if (rawJson) {
+    const creds = JSON.parse(rawJson);
+    const { JWT } = await import('google-auth-library');
+    let key = String(creds.private_key || '');
+    if (key.includes('\\n')) key = key.replace(/\\n/g, '\n');
+    const jwt = new JWT({
+      email: creds.client_email,
+      key,
       scopes,
-      clientOptions: delegatedUser ? { subject: delegatedUser } : undefined,
+      subject: delegatedUser || undefined,
+    });
+    return google.calendar({ version: 'v3', auth: jwt });
+  }
+
+  // --- Keyless DWD path (recommended) ---
+  if (dwdSaEmail && delegatedUser) {
+    // Ensure the IAMCredentials API client uses ADC (Cloud Run SA).
+    const iam = google.iamcredentials('v1');
+    const name = `projects/-/serviceAccounts/${dwdSaEmail}`;
+
+    const now = Math.floor(Date.now() / 1000);
+    const payload = {
+      iss: dwdSaEmail,
+      scope: scopes.join(' '),
+      aud: 'https://oauth2.googleapis.com/token',
+      sub: delegatedUser,
+      iat: now,
+      exp: now + 3600,
+    };
+
+    // Ask IAM to sign the JWT on behalf of the DWD SA (no private key in app).
+    const { data } = await iam.projects.serviceAccounts.signJwt({
+      name,
+      requestBody: { payload: JSON.stringify(payload) },
     });
 
-    // Important: pass `auth` (GoogleAuth), not the raw client.
+    const assertion = data.signedJwt;
+    if (!assertion) throw new Error('signJwt did not return signedJwt');
+
+    // Exchange for an access_token
+    const resp = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+        assertion,
+      }),
+    });
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`token_exchange_failed: ${resp.status} ${text}`);
+    }
+
+    const tok = await resp.json() as { access_token: string };
+    const auth = new google.auth.OAuth2();
+    auth.setCredentials({ access_token: tok.access_token });
     return google.calendar({ version: 'v3', auth });
   }
 
-  // Default: ADC / workload identity (Cloud Run SA). No DWD.
-  if (delegatedUser) {
-    console.warn(
-      'GOOGLE_DELEGATED_USER is set but no SA key provided; ADC/workload cannot impersonate a user. Proceeding without DWD.'
-    );
-  }
-
-  // Important: again, pass the GoogleAuth instance itself.
+  // Fallback: plain ADC (works only if the calendar is *shared* to the SA)
   const auth = new google.auth.GoogleAuth({ scopes });
   return google.calendar({ version: 'v3', auth });
 }

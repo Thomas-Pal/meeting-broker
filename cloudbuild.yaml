@@ -9,7 +9,6 @@ substitutions:
   _AR_REPO: "innerpeace"
   _SERVICE: "meeting-broker"
   _RUNTIME_SA: "bookings-bot@level-array-470911-t3.iam.gserviceaccount.com"
-  IMAGE: "ignore"
 
 steps:
   # Build image

@@ -10,45 +10,50 @@ substitutions:
   _SERVICE_ACCOUNT_EMAIL: bookings-bot@level-array-470911-t3.iam.gserviceaccount.com
   _IMPERSONATE_USER: thomaspal@innerpeace-developer.co.uk
   _CALENDAR_ID: thomaspal@innerpeace-developer.co.uk
+  # Name of Secret Manager secret that stores the raw JSON private key or the PEM-only private key.
+  # Create it once with:
+  #   echo -n "$GOOGLE_PRIVATE_KEY_JSON" | gcloud secrets create GOOGLE_PRIVATE_KEY --data-file=-
+  _SECRET_NAME: GOOGLE_PRIVATE_KEY
 
 steps:
-  # Build Docker image
+  # 1) Build and push the image to Artifact Registry
   - name: gcr.io/cloud-builders/docker
     args:
-      - build
-      - -t
-      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA
-      - -f
-      - Dockerfile
-      - .
-
-  # Push image
+      [
+        "build",
+        "-t",
+        "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA",
+        ".",
+      ]
   - name: gcr.io/cloud-builders/docker
     args:
-      - push
-      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA
+      [
+        "push",
+        "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA",
+      ]
 
-  # Deploy to Cloud Run
+  # 2) Deploy to Cloud Run with correct env vars + secret for GOOGLE_PRIVATE_KEY
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
-    entrypoint: bash
+    entrypoint: gcloud
     args:
-      - -lc
-      - |
-        set -euo pipefail
-
-
-        gcloud run deploy "${_SERVICE}" \
-          --image="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA" \
-          --region="${_REGION}" \
-          --platform=managed \
-          --service-account="${_RUNTIME_SA}" \
-          --set-env-vars=NODE_ENV=production \
-          --set-env-vars=SERVICE_ACCOUNT_EMAIL=${_SERVICE_ACCOUNT_EMAIL} \
-          --set-env-vars=IMPERSONATE_USER=${_IMPERSONATE_USER} \
-          --set-env-vars=CALENDAR_ID=${_CALENDAR_ID} \
-          --allow-unauthenticated \
-          --timeout=2000\
-          --quiet
+      [
+        "run",
+        "deploy",
+        "${_SERVICE}",
+        "--image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA",
+        "--region=${_REGION}",
+        "--platform=managed",
+        "--service-account=${_RUNTIME_SA}",
+        "--allow-unauthenticated",
+        "--port=8080",
+        "--timeout=2000",
+        "--set-env-vars=NODE_ENV=production",
+        "--set-env-vars=CALENDAR_ID=${_CALENDAR_ID}",
+        "--set-env-vars=GOOGLE_SERVICE_ACCOUNT_EMAIL=${_SERVICE_ACCOUNT_EMAIL}",
+        "--set-env-vars=GOOGLE_DELEGATED_USER=${_IMPERSONATE_USER}",
+        "--set-secrets=GOOGLE_PRIVATE_KEY=${_SECRET_NAME}:latest",
+        "--quiet",
+      ]
 
 images:
   - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA

@@ -2,12 +2,12 @@
   "name": "meeting-broker",
   "version": "1.0.0",
   "description": "Express API for calendar bookings, Supabase logs, YouTube feeds, and Meet link generation",
-  "main": "index.js",
-  "type": "module",
+  "main": "dist/index.js",
+  "type": "commonjs",
   "scripts": {
-    "dev": "node --watch index.js",
+    "dev": "ts-node --esm src/index.ts || node dist/index.js",
     "build": "tsc",
-    "start": "node index.js"
+    "start": "node dist/index.js"
   },
   "dependencies": {
     "@google-cloud/iam-credentials": "^4.2.0",

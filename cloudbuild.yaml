@@ -41,10 +41,8 @@ steps:
       - |
         set -euo pipefail
 
-        IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA"
-
         gcloud run deploy "${_SERVICE}" \
-          --image="${IMAGE}" \
+          --image="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA"\
           --region="${_REGION}" \
           --platform=managed \
           --allow-unauthenticated \

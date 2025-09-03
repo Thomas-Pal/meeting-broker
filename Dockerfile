@@ -1,21 +1,22 @@
-# Dockerfile
-FROM node:20-alpine
-
+# ---- build stage ----
+FROM node:20-alpine AS builder
 WORKDIR /app
 COPY package*.json ./
-# install dev deps so we can compile TS
 RUN npm ci
-
-# copy code and build
 COPY . .
 RUN npm run -s build
-
-# prune dev deps after build for a slim runtime
 RUN npm prune --omit=dev
 
+# ---- runtime stage ----
+FROM node:20-alpine
+WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=8080
 EXPOSE 8080
 
-# use the start script: node dist/index.js
-CMD ["npm","start"]
+COPY --from=builder /app/package*.json ./
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/dist ./dist
+
+# Run the compiled app
+CMD ["node","dist/index.js"]
